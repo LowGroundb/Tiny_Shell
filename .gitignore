@@ -1,0 +1,11 @@
+﻿# object files
+*.o
+*.obj
+
+# executables
+*.exe
+tiny_shell
+
+# editor/project files
+*.swp
+.vscode/
