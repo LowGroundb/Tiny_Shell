@@ -36,7 +36,7 @@ char* find_in_path(const char* command) {
     return result;
 }
 
-int execute_external_command(char *argv[], int argc) {
+int execute_external_command(char *argv[]) {
     char* full_path = find_in_path(argv[0]);
     if (!full_path) {
         printf("%s: command not found\n", argv[0]);
@@ -88,7 +88,7 @@ int command_processing(char *argv[], int argc) {
         return 1;
     }
     if (strcmp(argv[0], "ls") == 0 || strcmp(argv[0], "cat") == 0 || strcmp(argv[0], "echo") == 0) {
-        return execute_external_command(argv, argc);
+        return execute_external_command(argv);
     }
     
     printf("%s: command not found.\n", argv[0]);
