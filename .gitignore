@@ -10,3 +10,11 @@ tiny_shell
 *.swp
 .vscode/
 tiny_shell
+
+# Ignore VS Code settings
+.vscode/
+
+# Ignore compiled files
+tiny_shell
+*.o
+*.out
