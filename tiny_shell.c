@@ -4,8 +4,39 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/types.h>
-
+#include <stdbool.h>
+#include <fcntl.h>
 extern char **environ;  // Για το execve
+
+int redirect(char *infile, char *outfile, int append) {
+    int fd;
+
+    if (outfile != NULL) {
+        if (append)
+            fd = open(outfile, O_WRONLY | O_CREAT | O_APPEND, 0777);
+        else
+            fd = open(outfile, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+
+        if (fd < 0) {
+            perror("open");
+            return -1;
+        }
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+    }
+
+    if (infile != NULL) {
+        fd = open(infile, O_RDONLY);
+        if (fd < 0) {
+            perror("open infile");
+            return -1;
+        }
+        dup2(fd, STDIN_FILENO);
+        close(fd);
+    }
+
+    return 0;
+}
 
 char* find_in_path(const char* command) {
     if (strchr(command, '/') != NULL) {
@@ -36,7 +67,7 @@ char* find_in_path(const char* command) {
     return result;
 }
 
-int execute_external_command(char *argv[]) {
+int execute_external_command(char *argv[], char *infile, char *outfile, int append) {
     char* full_path = find_in_path(argv[0]);
     if (!full_path) {
         printf("%s: command not found\n", argv[0]);
@@ -45,16 +76,23 @@ int execute_external_command(char *argv[]) {
     
     pid_t pid = fork();
     
-    if (pid == -1) {
+    if (pid < 0) {
         perror("fork");
         free(full_path);
         return 1;
-    } else if (pid == 0) {
+    } 
+    if (pid == 0) {
+        
+        //child
+        if (redirect(infile, outfile, append) < 0)
+            exit(1);
         execve(full_path, argv, environ);
         perror("execve");
         free(full_path);
         exit(127);
-    } else {
+    }
+    else {
+        //parent
         int status;
         waitpid(pid, &status, 0);
         free(full_path);
@@ -73,11 +111,45 @@ int execute_external_command(char *argv[]) {
 
 int command_processing(char *argv[], int argc) {
     if (argc == 0) return 1;
-    
+    // na rwthsw an to oti exit asdaskd kanei exit einai kako
     if (strcmp(argv[0], "exit") == 0) {
         return 0;
     }
-    
+    char* infile = NULL;
+    char* outfile = NULL;
+    int append = 0;
+for (int i = 0; i < argc; i++) {
+        if (argv[i] == NULL) continue;
+
+        if (strcmp(argv[i], ">") == 0 || strcmp(argv[i], ">>") == 0) {
+            if (i + 1 >= argc) {
+                printf("Syntax error: missing output file\n");
+                return 1;
+            }
+            outfile = argv[i + 1];
+            append = (strcmp(argv[i], ">>") == 0) ? 1 : 0;
+            argv[i] = NULL;
+            argv[i + 1] = NULL;
+            i++;
+        } 
+        else if (strcmp(argv[i], "<") == 0) {
+            if (i + 1 >= argc) {
+                printf("Syntax error: missing input file\n");
+                return 1;
+            }
+            infile = argv[i + 1];
+            argv[i] = NULL;
+            argv[i + 1] = NULL;
+            i++; 
+        }
+    }
+
+    int w = 0;
+    for (int r = 0; r < argc; r++)
+        if (argv[r] != NULL)
+            argv[w++] = argv[r];
+    argv[w] = NULL;
+
     if (strcmp(argv[0], "help") == 0) {
         printf("Available commands:\n");
         printf("help - Show this help message\n");
@@ -87,12 +159,7 @@ int command_processing(char *argv[], int argc) {
         printf("echo - Display a line of text\n");
         return 1;
     }
-    if (strcmp(argv[0], "ls") == 0 || strcmp(argv[0], "cat") == 0 || strcmp(argv[0], "echo") == 0) {
-        return execute_external_command(argv);
-    }
-    
-    printf("%s: command not found.\n", argv[0]);
-    return 1;
+        return execute_external_command(argv, infile, outfile, append);
 }
 
 
