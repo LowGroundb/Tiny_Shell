@@ -8,6 +8,7 @@
 #include <fcntl.h>
 extern char **environ;  // Για το execve
 
+
 int redirect(char *infile, char *outfile, int append) {
     int fd;
 
@@ -108,48 +109,154 @@ int execute_external_command(char *argv[], char *infile, char *outfile, int appe
         return 1;
     }
 }
+int parse_redirection(char *argv[], int *argc,char **infile, char **outfile, int *append) {
+    *infile = NULL;
+    *outfile = NULL;
+    *append = 0;
+    for (int i = 0; i < *argc; i++) {
+        if (argv[i] == NULL) continue;
 
+        if (strcmp(argv[i], ">") == 0 || strcmp(argv[i], ">>") == 0) {
+            if (i + 1 >= *argc || argv[i+1] == NULL) {
+                printf("Syntax error: missing output file\n");
+                return -1;
+            }
+
+            *outfile = argv[i+1];
+            *append = (strcmp(argv[i], ">>") == 0);
+
+            argv[i]   = NULL;
+            argv[i+1] = NULL;
+            i++;
+        }
+        else if (strcmp(argv[i], "<") == 0) {
+            if (i + 1 >= *argc || argv[i+1] == NULL) {
+                printf("Syntax error: missing input file\n");
+                return -1;
+            }
+            *infile = argv[i+1];
+            argv[i]   = NULL;
+            argv[i+1] = NULL;
+            i++;
+        }
+    }
+    int w = 0;
+    for (int r = 0; r < *argc; r++)
+        if (argv[r] != NULL)
+            argv[w++] = argv[r];
+
+    argv[w] = NULL;
+    *argc = w;
+
+    return 0;
+}
+int command_count(char *argv[], int argc){
+    int count = 0;
+    for (int i = 0; i < argc; i++) {
+        if (i == 0 || (i > 0 && argv[i-1] == NULL)) {
+            if (argv[i] != NULL) count++;
+        }
+    }
+    return count;
+}
+int pipe_detection(char *argv[], int argc){
+    for (int i = 0; i < argc; i++) {
+        if (argv[i] == NULL) continue;
+
+        if (strcmp(argv[i], "|") == 0 ){
+            if (i==0 ||argv[i+1] == NULL || strcmp(argv[i+1], "|") == 0) {
+                printf("Syntax error: missing command after pipe\n");
+                return 2;
+            }
+            argv[i] = NULL;
+        } 
+    }
+   return  command_count(argv, argc) ;
+
+  
+}
+int piping(char *argv[], int pipe_count){
+    int fd[pipe_count-1][2];
+    pid_t pids[pipe_count];
+
+    for(int i = 0; i < pipe_count - 1; i++){
+        if(pipe(fd[i]) == -1){
+            perror("pipe");
+            return -1;
+        }
+    }
+    int start = 0;
+    for(int i = 0; i < pipe_count; i++){
+        int end = start;
+        while(argv[end] != NULL) {
+            end++;
+        }
+        char **cmd = &argv[start];
+
+        pids[i] = fork();
+        if(pids[i] < 0){
+            perror("fork");
+            return -1;
+        }
+        if(pids[i] == 0){
+            //child
+            if(i > 0){
+                dup2(fd[i-1][0], STDIN_FILENO);
+            }
+            if(i < pipe_count - 1){
+                dup2(fd[i][1], STDOUT_FILENO);
+            }
+            for(int j = 0; j < pipe_count - 1; j++){
+                close(fd[j][0]);
+                close(fd[j][1]);
+            }
+            // κάνουμε redirect πριν το execvp
+            char *infile = NULL;
+            char *outfile = NULL;
+            int append = 0;
+            int dummy_argc = (end - start);  
+            parse_redirection(cmd, &dummy_argc, &infile, &outfile, &append);
+
+          
+            if (redirect(infile, outfile, append) < 0) {
+                exit(1);
+                }
+            execvp(cmd[0], cmd);
+            perror("execvp");
+            exit(127);
+        }
+        else{
+            //parent
+            start = end + 1;
+        }
+    }
+    for(int i = 0; i < pipe_count - 1; i++){
+        close(fd[i][0]);
+        close(fd[i][1]);
+    }
+    for(int i = 0; i < pipe_count; i++){
+        waitpid(pids[i], NULL, 0);
+    }
+    return 1;
+}
 int command_processing(char *argv[], int argc) {
-    if (argc == 0) return 1;
+    if (argc == 0 || argv[0] == NULL) return -1;
     // na rwthsw an to oti exit asdaskd kanei exit einai kako
-    if (strcmp(argv[0], "exit") == 0) {
-        return 0;
+    int commands = pipe_detection(argv, argc);
+    if (commands == -1){
+        return -1;
+    }
+    if (commands > 1) {
+        return piping(argv, commands);
     }
     char* infile = NULL;
     char* outfile = NULL;
     int append = 0;
-for (int i = 0; i < argc; i++) {
-        if (argv[i] == NULL) continue;
+    parse_redirection(argv, &argc, &infile, &outfile, &append);
 
-        if (strcmp(argv[i], ">") == 0 || strcmp(argv[i], ">>") == 0) {
-            if (i + 1 >= argc) {
-                printf("Syntax error: missing output file\n");
-                return 1;
-            }
-            outfile = argv[i + 1];
-            append = (strcmp(argv[i], ">>") == 0) ? 1 : 0;
-            argv[i] = NULL;
-            argv[i + 1] = NULL;
-            i++;
-        } 
-        else if (strcmp(argv[i], "<") == 0) {
-            if (i + 1 >= argc) {
-                printf("Syntax error: missing input file\n");
-                return 1;
-            }
-            infile = argv[i + 1];
-            argv[i] = NULL;
-            argv[i + 1] = NULL;
-            i++; 
-        }
+     if (strcmp(argv[0], "exit") == 0) {
+        return 0;
     }
-
-    int w = 0;
-    for (int r = 0; r < argc; r++)
-        if (argv[r] != NULL)
-            argv[w++] = argv[r];
-    argv[w] = NULL;
-
     if (strcmp(argv[0], "help") == 0) {
         printf("Available commands:\n");
         printf("help - Show this help message\n");
