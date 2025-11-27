@@ -22,7 +22,7 @@ TinyShell
 2. Compiler gcc ή clang
 3. Εγκατεστημένα βασικά Unix εγαλεία (ls,cat,echo) αφού δεν έγινε η υλοποίση αυτών αλλά απλά καλούνται από το PATH
 
-Για Build:
+Για Build: 
 -----------------------------------------------------------------------
 gcc -Wall -Wextra -o tinyshell tiny_shell.c
 
