@@ -18,3 +18,8 @@ tiny_shell
 tiny_shell
 *.o
 *.out
+
+# Ignore files
+main
+main1
+yeah
