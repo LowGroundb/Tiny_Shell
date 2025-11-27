@@ -24,7 +24,7 @@ TinyShell
 
 Για Build:
 -----------------------------------------------------------------------
-gcc -Wall -Wextra -o tinyshell tinyshell.c
+gcc -Wall -Wextra -o tinyshell tiny_shell.c
 
 Για Εκτέλεση
 -----------------------------------------------------------------------
