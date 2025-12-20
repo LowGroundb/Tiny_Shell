@@ -1,3 +1,4 @@
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -6,9 +7,97 @@
 #include <sys/types.h>
 #include <stdbool.h>
 #include <fcntl.h>
+#include <stdbool.h>
+#include <errno.h>
+int next_job_id = 1; //ID counter
 extern char **environ;  // Για το execve
+typedef enum {
+    RUNNING,
+    STOPPED,
+    DONE
+} job_state_t;
+
+typedef struct {
+    int job_id;
+    pid_t pgid;
+    job_state_t state;
+    char command[256];
+} job_t;
+
+#define MAX_JOBS 100
+job_t jobs[MAX_JOBS];
+int job_count = 0;
+
+int add_job(pid_t pgid, job_state_t state, const char *cmd) {
+    if (job_count >= MAX_JOBS) return -1;
+    
+    jobs[job_count].job_id = next_job_id++;
+    jobs[job_count].pgid = pgid;
+    jobs[job_count].state = state;
+    strncpy(jobs[job_count].command, cmd, sizeof(jobs[job_count].command) - 1);
+    
+    return jobs[job_count++].job_id;
+}
+
+job_t* find_job(int job_id) {
+    for (int i = 0; i < job_count; i++) {
+        if (jobs[i].job_id == job_id && jobs[i].state != DONE) {
+            return &jobs[i];
+        }
+    }
+    return NULL;
+}
+
+void sigchld_handler(int sig) {
+    int old_errno = errno;
+    int status;
+    pid_t pid;
+
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0) {
+        for (int i = 0; i < job_count; i++) {
+            if (jobs[i].pgid == pid) {
+                if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                    printf("\n[%d]+ Done    %s\n",
+                    jobs[i].job_id, jobs[i].command);
+                    jobs[i].state = DONE;
+                } else if (WIFSTOPPED(status)) {
+                    jobs[i].state = STOPPED;
+                } else if (WIFCONTINUED(status)) {
+                    jobs[i].state = RUNNING;
+                }
+            }
+        }
+    }
+
+    errno = old_errno;
+}
 
 
+void remove_job(int job_id) {
+    for (int i = 0; i < job_count; i++) {
+        if (jobs[i].job_id == job_id) {
+            // Shift remaining jobs
+            for (int j = i; j < job_count - 1; j++) {
+                jobs[j] = jobs[j + 1];
+            }
+            job_count--;
+            break;
+        }
+    }
+}
+
+void init_signal_handlers(void) {
+    struct sigaction sa;
+
+    sa.sa_handler = SIG_IGN;      
+    sigemptyset(&sa.sa_mask);   
+    sa.sa_flags = SA_RESTART;    
+
+    sigaction(SIGINT, &sa, NULL);   
+    sigaction(SIGTSTP, &sa, NULL);  
+    sigaction(SIGTTIN, &sa, NULL);  
+    sigaction(SIGTTOU, &sa, NULL);  
+}
 int redirect(char *infile, char *outfile, int append) {
     int fd;
 
@@ -68,44 +157,62 @@ char* find_in_path(const char* command) {
     return result;
 }
 
-int execute_external_command(char *argv[], char *infile, char *outfile, int append) {
+int execute_external_command(char *argv[], char *infile, char *outfile, int append, bool background) {
     char* full_path = find_in_path(argv[0]);
     if (!full_path) {
         printf("%s: command not found\n", argv[0]);
         return 1;
     }
     
-    pid_t pid = fork();
     
+    pid_t pid = fork();
+   
     if (pid < 0) {
         perror("fork");
         free(full_path);
         return 1;
     } 
     if (pid == 0) {
-        
-        //child
-        if (redirect(infile, outfile, append) < 0)
+         //child
+        struct sigaction sa_child;
+        sa_child.sa_handler = SIG_DFL;
+        sigemptyset(&sa_child.sa_mask);
+        sa_child.sa_flags = 0;
+
+    sigaction(SIGINT, &sa_child, NULL);
+    sigaction(SIGTSTP, &sa_child, NULL);
+    sigaction(SIGQUIT, &sa_child, NULL);
+        if (redirect(infile, outfile, append) < 0){
             exit(1);
+        }
+
         execve(full_path, argv, environ);
         perror("execve");
         free(full_path);
         exit(127);
     }
-    else {
-        //parent
+ else {
+        // PARENT
+    setpgid(pid, pid);
+
+    if (!background) {
+        tcsetpgrp(STDIN_FILENO, pid);
+
         int status;
-        waitpid(pid, &status, 0);
+        waitpid(pid, &status, WUNTRACED);
+
+        tcsetpgrp(STDIN_FILENO, getpgrp());
+
+    if (WIFSTOPPED(status)) {
+        int jid = add_job(pid, STOPPED, argv[0]);
+        printf("\n[%d]+ Stopped    %s\n", jid, argv[0]);
+    }
+}   else {
+        int jid = add_job(pid, RUNNING, argv[0]);
+        printf("[%d] %d\n", jid, pid);
+}
+
         free(full_path);
-        
-        if (WIFEXITED(status)) {
-            int exit_code = WEXITSTATUS(status);
-            if (exit_code != 0) {
-                printf("Exit code: %d\n", exit_code);
-            }
-        } else if (WIFSIGNALED(status)) {
-            printf("Process terminated by signal: %d\n", WTERMSIG(status));
-        }
         return 1;
     }
 }
@@ -240,6 +347,75 @@ int piping(char *argv[], int pipe_count){
     return 1;
 }
 int command_processing(char *argv[], int argc) {
+    if (strcmp(argv[0], "fg") == 0) {
+    if (argc < 2 || argv[1][0] != '%') {
+        printf("Usage: fg %%N\n");
+        return 1;
+    }
+    
+    int job_id = atoi(&argv[1][1]);
+    job_t *job = find_job(job_id);
+    
+    if (!job) {
+        printf("fg: %%%d: no such job\n", job_id);
+        return 1;
+    }
+    
+    // Send SIGCONT
+    kill(-job->pgid, SIGCONT);
+    
+    // Give terminal control
+    tcsetpgrp(STDIN_FILENO, job->pgid);
+    
+    // Wait for it
+    int status;
+    job->state = RUNNING;
+    waitpid(-job->pgid, &status, WUNTRACED);
+
+    
+    // Take back terminal control
+    tcsetpgrp(STDIN_FILENO, getpgrp());
+    
+    if (WIFSTOPPED(status)) {
+        job->state = STOPPED;
+        printf("\n[%d]+ Stopped    %s\n", job->job_id, job->command);
+    } else {
+        remove_job(job_id);
+    }
+    
+    return 1;
+}
+
+if (strcmp(argv[0], "bg") == 0) {
+    if (argc < 2 || argv[1][0] != '%') {
+        printf("Usage: bg %%N\n");
+        return 1;
+    }
+    
+    int job_id = atoi(&argv[1][1]);
+    job_t *job = find_job(job_id);
+    
+    if (!job) {
+        printf("bg: %%%d: no such job\n", job_id);
+        return 1;
+    }
+    
+    // Send SIGCONT
+    kill(-job->pgid, SIGCONT);
+    job->state = RUNNING;
+    
+    printf("[%d]+ %s &\n", job->job_id, job->command);
+    
+    return 1;
+}
+    bool background = false;
+    if (argc > 0 && strcmp(argv[argc - 1], "&") == 0) {
+    background = true;
+    argv[argc - 1] = NULL;
+    argc--;
+}
+
+
     if (argc == 0 || argv[0] == NULL) return -1;
     // na rwthsw an to oti exit asdaskd kanei exit einai kako
     int commands = pipe_detection(argv, argc);
@@ -248,7 +424,7 @@ int command_processing(char *argv[], int argc) {
     }
     if (commands > 1) {
         return piping(argv, commands);
-    }
+    };
     char* infile = NULL;
     char* outfile = NULL;
     int append = 0;
@@ -266,7 +442,7 @@ int command_processing(char *argv[], int argc) {
         printf("echo - Display a line of text\n");
         return 1;
     }
-        return execute_external_command(argv, infile, outfile, append);
+        return execute_external_command(argv, infile, outfile, append , background);
 }
 
 
@@ -303,7 +479,16 @@ void tiny_shell_loop(void){
 }
 
 
-int main(void){
+int main(void) {
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGCHLD, &sa, NULL);
+
+    setpgid(0, 0);
+    tcsetpgrp(STDIN_FILENO, getpgrp());
+
+    init_signal_handlers();
     tiny_shell_loop();
-    return 0;           
 }
